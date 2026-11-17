@@ -10,12 +10,13 @@ Deploy and develop ePHEM using Docker. The setup script handles everything — j
 **Already have git and know your way around?**
 
 ```bash
+cd ~
 git clone https://github.com/borse/ephem_deployment_docker.git ephem-deploy
 cd ephem-deploy
 bash setup.sh
 ```
 
-The script asks what you're setting up and walks you through the rest. The rest of this README is reference. (Windows users: run this inside WSL, see [Windows — Run Inside WSL](#windows--run-inside-wsl).)
+The script asks what you're setting up and walks you through the rest. The rest of this README is reference. (Windows users: run this inside WSL, in the Ubuntu home folder and never on a Windows drive such as `/mnt/c` or `/mnt/d`. See [Windows — Run Inside WSL](#windows--run-inside-wsl).)
 
 ---
 
@@ -118,7 +119,7 @@ Because `setup.sh` runs *inside* WSL, it can't install WSL itself — that one b
 
 **From here on, run every command in this README inside the Ubuntu (WSL) terminal**, not PowerShell or CMD.
 
-> **Where to clone the repo:** keep it inside the Linux home folder (e.g. `/home/<you>/ephem-deploy`), not under `/mnt/c/...`. Files under `/mnt/c` work, but bind-mounts and Docker volumes are much slower there.
+> **Where to clone the repo: in the Ubuntu home folder, never on a Windows drive.** Run `cd ~` before `git clone`, so the repo ends up in `/home/<you>/ephem-deploy`. Ubuntu shows the Windows drives as `/mnt/c`, `/mnt/d` and so on, and a terminal opened from File Explorer, from PowerShell or from an editor often starts in one of them. On some of these drives git cannot set file permissions: the download of the ePHEM modules then stops with `chmod ... Operation not permitted`. On the others everything runs much more slowly. `setup.sh` stops when it is started from a Windows drive and prints the commands that move the repo.
 
 **After Windows starts:** Docker Desktop starts the containers about two seconds before Ubuntu shares the project files with it. Odoo (and nginx) then fail on their config file (`docker ps -a` shows `Exited (127)`, the error says "not a directory"), and Docker does not try again, so ePHEM stays down although nothing is broken. `setup.sh` offers a small start-up helper that starts them again each time Docker comes up: `bash scripts/dev-autostart.sh --install` (or `bash manage.sh`, Maintenance, `s`). It needs systemd in WSL (`[boot] systemd=true` in `/etc/wsl.conf`); the script says how to turn it on. Without it, `bash scripts/dev-autostart.sh` starts them once.
 
@@ -159,9 +160,12 @@ The whole process is three steps, the same on every platform:
 ### Step 2 — Clone the repo
 
 ```bash
+cd ~
 git clone https://github.com/borse/ephem_deployment_docker.git ephem-deploy
 cd ephem-deploy
 ```
+
+On Windows, `cd ~` is the Ubuntu home folder. Never clone onto a Windows drive (`/mnt/c`, `/mnt/d`, ...): see [Where to clone the repo](#windows--run-inside-wsl).
 
 ### Step 3 — Run setup
 
@@ -1251,6 +1255,10 @@ docker compose restart odoo
 If a module was moved, renamed or deleted by hand, `odoo.conf` may still list a folder that is gone and Odoo refuses to start (`addons-path: no such directory`). `bash setup.sh` rewrites the addons path from what is on disk, and `bash manage.sh` does so whenever a repository is added, renamed or removed.
 
 Go to **Apps → Update Apps List**.
+
+### Clone failed: `chmod on ... config.lock failed: Operation not permitted`
+
+The repo is on a Windows drive (its path starts with `/mnt/c`, `/mnt/d`, ...), where git cannot set file permissions. The deploy key is not the problem: "Access granted" just above the error means GitHub accepted it. Move the repo to the Ubuntu home folder: run `bash setup.sh` in the old folder and it prints the commands (stop ePHEM there, clone again under `~`, copy `.env` across). The deploy key lives in `~/.ssh` and keeps working, so there is no need to send it again.
 
 ### Start completely fresh
 

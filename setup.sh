@@ -254,6 +254,83 @@ detect_platform() {
     esac
 }
 
+# Under WSL the Windows drives (C:, D:, ...) appear as /mnt/c, /mnt/d. A
+# checkout there does not work: on some drives git cannot set file
+# permissions, so the clone of the ePHEM modules stops with "chmod ...
+# Operation not permitted" (sed -i on .env fails the same way), and on the
+# others every bind mount is much slower. findmnt knows such a drive by its
+# drvfs mount (9p with aname=drvfs on WSL 2, drvfs on WSL 1); the path is the
+# fallback when findmnt is missing.
+on_windows_drive() {  # on_windows_drive DIR
+    is_wsl || return 1
+    local fs="" opts=""
+    if command -v findmnt >/dev/null 2>&1 \
+       && read -r fs opts < <(findmnt -n -o FSTYPE,OPTIONS -T "$1" 2>/dev/null); then
+        case "$fs" in
+            drvfs) return 0 ;;
+            9p) case "$opts" in *drvfs*) return 0 ;; esac ;;
+        esac
+        return 1
+    fi
+    case "$1" in /mnt/[A-Za-z]|/mnt/[A-Za-z]/*) return 0 ;; esac
+    return 1
+}
+
+# A checkout on a Windows drive stops here, before anything is written, with
+# the commands that move it to the Ubuntu home folder. An install that already
+# works there (its ePHEM clone is in place) is told to move and goes on, so
+# updating it through setup.sh keeps working.
+windows_drive_gate() {
+    on_windows_drive "$EPHEM_ROOT" || return 0
+    local g installed=false win name url
+    for g in "$EPHEM_ROOT"/addons/*/.git "$EPHEM_ROOT"/odca*/*/.git \
+             "$EPHEM_ROOT"/odca*/.git "$EPHEM_ROOT"/custom-addons/.git; do
+        [ -d "$g" ] && { installed=true; break; }
+    done
+    win=$(wslpath -w "$EPHEM_ROOT" 2>/dev/null) || win=""
+    # The same folder name keeps the same compose project, so the database
+    # volume an earlier run created here is the one the new folder uses.
+    name=$(basename "$EPHEM_ROOT")
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || name="\"$name\""
+    url=$(git -C "$EPHEM_ROOT" remote get-url origin 2>/dev/null) \
+        || url="https://github.com/borse/ephem_deployment_docker.git"
+
+    echo ""
+    if [ "$installed" = true ]; then
+        echo -e "${YELLOW}!${NC} This folder is on a Windows drive: ${BOLD}${win:-$EPHEM_ROOT}${NC}"
+    else
+        echo -e "${RED}✗${NC} This folder is on a Windows drive: ${BOLD}${win:-$EPHEM_ROOT}${NC}"
+    fi
+    [ -n "$win" ] && echo "  (in Ubuntu: $EPHEM_ROOT)"
+    echo "  ePHEM belongs in your Ubuntu home folder. On a Windows drive git cannot always"
+    echo "  set file permissions (the download of the ePHEM modules then stops with"
+    echo "  \"Operation not permitted\"), and Docker reads the files much more slowly."
+    echo ""
+    echo "  To move it, run these in this Ubuntu terminal:"
+    echo ""
+    if [ -f "$EPHEM_ROOT/.env" ]; then
+        echo -e "    ${BOLD}cd \"$EPHEM_ROOT\" && $(compose_cmd_text) down${NC}    (stops ePHEM, keeps the data)"
+    fi
+    echo -e "    ${BOLD}cd ~${NC}"
+    echo -e "    ${BOLD}git clone $url $name${NC}"
+    if [ -f "$EPHEM_ROOT/.env" ]; then
+        echo -e "    ${BOLD}cp \"$EPHEM_ROOT/.env\" ~/$name/${NC}    (the passwords of that data)"
+    fi
+    echo -e "    ${BOLD}cd ~/$name${NC}"
+    echo -e "    ${BOLD}bash setup.sh${NC}"
+    echo ""
+    if [ -f "$HOME/.ssh/ephem_addons_deploy" ]; then
+        echo "  The deploy key is in your Ubuntu home (~/.ssh) and keeps working:"
+        echo "  there is no need to send it again."
+        echo ""
+    fi
+    if [ "$installed" = true ]; then
+        read -p "  Continue here this time anyway? [y/N]: " WIN_DRIVE_GO
+        [[ "${WIN_DRIVE_GO:-N}" =~ ^[Yy]$ ]] && return 0
+    fi
+    exit 1
+}
+
 # Developer mode clones with the operator's OWN GitHub key and mounts the
 # clones read-write, so it must run as the operator. Under sudo both break:
 # ssh reads root's ~/.ssh (usually no key at all, hence a bare "no SSH access"
@@ -388,7 +465,8 @@ ensure_docker_ready() {
         echo "    1. Open PowerShell as Administrator and run:"
         echo -e "         ${BOLD}wsl --install -d Ubuntu${NC}"
         echo "    2. Reboot if asked, then open the 'Ubuntu' app from the Start menu."
-        echo "    3. Inside Ubuntu, install git, clone the repo, and run: bash setup.sh"
+        echo "    3. Inside Ubuntu, install git, then in your home folder (cd ~) clone the repo"
+        echo "       and run: bash setup.sh"
         echo ""
         echo "  (Bind-mounts and Docker volumes are much faster under WSL than Git Bash.)"
         exit 1
@@ -642,6 +720,8 @@ dev_returning_gate() {
         *) exec bash manage.sh ;;
     esac
 }
+
+windows_drive_gate
 
 echo ""
 echo "========================================="
@@ -1646,6 +1726,7 @@ if [ "$MODE" != "developer" ]; then
 
         DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
         ADDONS_CLONED=false
+        CLONE_FAILED=false     # GitHub accepted the key and the clone itself broke
 
         # GitHub's SSH host keys, accepted only when they match GitHub's published
         # fingerprints (scripts/ssh-hostkeys-lib.sh, loaded through stack-lib.sh).
@@ -1676,9 +1757,21 @@ if [ "$MODE" != "developer" ]; then
                     echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
                     ADDONS_CLONED=true
                 else
-                    echo -e "${RED}✗${NC} Clone failed. Cleaning up partial clone..."
+                    # The key was accepted a moment ago, so the cause is on this
+                    # machine and git's own message above says what it is. Not the
+                    # "waiting for access" path below: that sends the operator back
+                    # to the ePHEM team with a key that works. Counted as an error,
+                    # so ePHEM is not started without its modules.
+                    echo ""
+                    echo -e "${RED}✗${NC} The download of the ePHEM modules stopped, although GitHub accepted the deploy key."
+                    echo "     The key is fine (no need to send it again): the problem is on this machine,"
+                    echo "     and git says what it is just above. The usual causes: a full disk, the network"
+                    echo "     dropping out, or a folder that refuses file permissions (a Windows drive, a"
+                    echo "     synced or network folder)."
                     rm -rf "$CORE_TARGET"
                     mkdir -p "$CORE_TARGET"
+                    CLONE_FAILED=true
+                    ERRORS=$((ERRORS + 1))
                 fi
             else
                 echo -e "${YELLOW}!${NC} Deploy key exists but access not yet granted"
@@ -1686,7 +1779,7 @@ if [ "$MODE" != "developer" ]; then
             fi
         fi
 
-        if [ "$ADDONS_CLONED" = false ]; then
+        if [ "$ADDONS_CLONED" = false ] && [ "$CLONE_FAILED" = false ]; then
             mkdir -p "$CORE_TARGET"
             NEEDS_ADDONS_ACCESS=true
 
