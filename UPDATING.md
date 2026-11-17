@@ -1,3 +1,88 @@
+# Updating an Existing Server (November 2026: app image 1.0.6)
+
+A new release of both images, `borrs/ephem:1.0.6` and
+`borrs/ephem-office:1.0.6`, for Intel/AMD servers and Apple Silicon Macs
+alike (Docker picks the right one). No code, no data, no module update: the
+server switches image and Odoo restarts once, about a minute.
+**Take this one soon** for the security fixes in item 2.
+
+What it delivers:
+
+1. **Excel opens the workbooks ePHEM builds without a repair prompt.** The
+   openpyxl of the previous images (Ubuntu's 3.1.2) wrote an invalid date
+   into every .xlsx made on the server: line list entry templates, daily
+   sitreps, IAP plans, surveillance bulletins, 4W templates, EMT documents.
+   Excel answered "We found a problem with
+   some content" and offered to repair the file. Image 1.0.6 runs openpyxl
+   3.1.5, which writes valid dates. Files downloaded before the update keep
+   the bad date; answering Yes to Excel's repair prompt fixes them safely.
+2. **Security fixes.**
+   - pypdf 6.21.4 closes 18 published flaws of 6.19.0 (10 rated high): a
+     crafted PDF could make the upload compression loop or exhaust memory.
+     ePHEM already ran it in a separate process with limits, so the damage
+     was bounded.
+   - pypdfium2 5.15.2 brings the newer PDFium (ePHEM AI reads PDF charts
+     with it).
+   - Odoo 18 build of 12 November, and every Ubuntu security update
+     published since 1.0.5 (C library, libxml2, curl, zlib, libpng, lxml,
+     Pillow, urllib3, among 30). The security scan of both images finds no
+     high or critical flaw with a fix available (1.0.5: 13).
+3. Nothing else moves. pandas stays on 3.0 on purpose: 3.1 would replace a
+   library Odoo itself runs on.
+
+## Steps (run on each server)
+
+```bash
+cd ~/ephem-deploy
+bash manage.sh        # u (Update), then i (App image only), version 1.0.6
+                      # It checks both images exist, offers a backup, pulls
+                      # them and recreates the containers.
+                      # By hand instead: EPHEM_IMAGE_TAG=1.0.6 in .env, then
+                      #   docker compose pull && docker compose up -d
+```
+
+## Verify afterwards
+
+```bash
+# The release this server runs (expect 1.0.6)
+grep '^EPHEM_IMAGE_TAG=' .env
+
+# The new libraries (expect 3.1.5 6.21.4)
+docker compose exec odoo python3 -c "import openpyxl, pypdf; print(openpyxl.__version__, pypdf.__version__)"
+
+# Reports keep their header and footer (expect "with patched qt")
+docker compose exec odoo wkhtmltopdf --version
+
+# The office converter came back (expect ephem-office healthy)
+docker compose ps
+```
+
+Then download an Excel file ePHEM builds on the server (a line list entry
+template, a surveillance bulletin export or an IAP plan workbook) and open it
+in Excel: no repair prompt.
+
+## Servers without Docker (Odoo installed on the VM)
+
+The images do not reach them. Bring the same libraries into Odoo's
+environment and restart; no module update is needed.
+
+```bash
+sudo -u odoo /opt/odoo/venv/bin/pip install pypdf==6.21.4 pypdfium2==5.15.2 openpyxl==3.1.5
+sudo systemctl restart odoo18
+```
+
+The Excel prompt only appears where Odoo loads Ubuntu's openpyxl (the path
+printed by `/opt/odoo/venv/bin/python3 -c "import openpyxl; print(openpyxl.__file__)"`
+is under `/usr/lib/python3`); a virtual environment built from Odoo's
+requirements already has a sound 3.1.2. Installing 3.1.5 is harmless either
+way and matches what the images run.
+
+## Rolling back
+
+```bash
+bash manage.sh        # u, then i, version 1.0.5 (both images exist for it)
+```
+
 # Windows machines (WSL): ePHEM comes back after Windows starts (November 2026)
 
 For every install inside WSL with Docker Desktop: developer machines, demo
